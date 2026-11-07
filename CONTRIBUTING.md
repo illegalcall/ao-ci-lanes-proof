@@ -112,3 +112,4 @@ and suggest features. The time and link are shared on Discord.
 Be respectful, constructive, and assume good intent. Report problems to maintainers via Discord DM.
 
 Thanks for making agent-orchestrator better for the next person who shows up.
+<!-- proof: stack parent -->
