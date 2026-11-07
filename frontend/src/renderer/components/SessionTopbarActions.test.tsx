@@ -883,3 +883,7 @@ describe("SessionArchiveShortcut", () => {
 		expect(await screen.findByText("worker one failed")).toBeInTheDocument();
 	});
 });
+
+it("proof: this test fails on purpose", () => {
+	expect(1).toBe(2);
+});
