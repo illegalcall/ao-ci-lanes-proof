@@ -79,3 +79,4 @@ export function colorDistance(a: string, b: string): number {
 	const y = rgbToOklab(parseHex(b));
 	return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
 }
+// proof: shared package scenario
