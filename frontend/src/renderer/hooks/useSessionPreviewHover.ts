@@ -349,3 +349,4 @@ export function useSessionPreviewHover(suppressed: boolean) {
 
 	return { open: state.open && !suppressed, animation: state.animation, hide, triggerProps, contentProps, rowRef };
 }
+// proof: related vitest scenario
