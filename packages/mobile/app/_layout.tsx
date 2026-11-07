@@ -1,0 +1,332 @@
+// Per weight, not from the package root: the barrels pull every face the family
+// ships, and this app draws four of the thirty-six.
+import { GeistMono_400Regular } from "@expo-google-fonts/geist-mono/400Regular";
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider as NavigationThemeProvider } from "expo-router";
+import { getFocusedRouteNameFromRoute } from "expo-router/react-navigation";
+import * as SplashScreen from "expo-splash-screen";
+import { StatusBar } from "expo-status-bar";
+import { useFonts } from "expo-font";
+import { useEffect, useMemo, useState } from "react";
+import { Platform, View } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { KeyboardProvider } from "react-native-keyboard-controller";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+import { OnboardingGate } from "../lib/OnboardingGate";
+import { TelemetryManager } from "../lib/TelemetryManager";
+import { rootTouchStart } from "../lib/touchOutside";
+import { PushManager } from "../lib/PushManager";
+import { UpdatesManager } from "../lib/UpdatesManager";
+import { StoreUpdateManager } from "../lib/StoreUpdateManager";
+import { boardTitle } from "../lib/board-tabs";
+import { GLASS_HEADER_OPTIONS, stackScreenOptions } from "../lib/stackScreenOptions";
+import { AppProvider } from "../lib/store";
+import { appFonts } from "../lib/appFonts";
+import { symbolFonts } from "../lib/symbolFonts";
+import { ThemeProvider, useTheme, useThemeState } from "../lib/ThemeProvider";
+import { loadThemeSettings, type ThemeSettings } from "../lib/themeStore";
+import { sheetCornerRadius } from "../lib/tokens";
+
+// Sheet routes, and how tall each is allowed to be.
+//
+// A sheet that scrolls needs a real height to scroll within, so it takes
+// explicit detents — `fitToContents` cannot measure a scroll view. The usage
+// sheet renders a plain view, so it wraps its content exactly.
+//
+// Input sheets are registered separately below so their heights can respond to
+// the keyboard.
+//
+// `androidDetents` pins an action sheet to one height on Android. With two
+// detents Material's BottomSheetBehavior treats the lower one as "collapsed",
+// and from there it only hides once the sheet has been dragged past half of
+// that height or flung hard; a normal swipe snaps back. With one detent it
+// skips the collapsed state and closes on any decisive swipe down, which is
+// what an action sheet needs. iOS keeps both detents: UIKit's sheet dismisses
+// from the lower one with an ordinary swipe.
+const SHEET_ROUTES: readonly { name: string; detents: readonly number[] | "fitToContents"; androidDetents?: readonly [number] }[] = [
+	{ name: "sheets/conversation-usage", detents: "fitToContents" },
+	{ name: "sheets/artifact-history", detents: [0.6, 0.95] },
+	{ name: "sheets/review-actions", detents: [0.6, 0.95], androidDetents: [0.6] },
+	{ name: "files/[sessionId]/review", detents: [0.5, 1] },
+];
+
+// Picker sheets that iOS titles in a native bar, as it does a form sheet's;
+// Android keeps the title in the sheet's body. A page may retitle its bar, as
+// the agent picker does for Chat.
+const PICKER_SHEETS = [
+	{ name: "sheets/agent", title: "Agent" },
+	{ name: "sheets/model", title: "Model" },
+] as const;
+
+// iOS's machine-name sheet, the one sheet with a text input: a native bar
+// with an inline title, Cancel and the confirm action, as a form sheet's are.
+// Shown from the start rather than by the page, because a modal whose header
+// appears after it mounts is rebuilt. Its body is a SwiftUI Form, which scrolls
+// and fills the sheet rather than measuring to fit, so the route sets a fixed
+// height. (Manual connect, which once shared these, is a pushed page.)
+const NAME_SHEET_OPTIONS = {
+	presentation: "formSheet",
+	sheetAllowedDetents: [1] as number[],
+	sheetShouldOverflowTopInset: true,
+	sheetGrabberVisible: true,
+	sheetCornerRadius,
+	headerShown: Platform.OS === "ios",
+} as const;
+
+// The board sits under every route the app is opened on. A deep link or a
+// notification tap that cold-starts the app on a session, a review or a file
+// otherwise arrives with nothing behind it, and the system back button only
+// appears when there is somewhere to go back to. Opening the app on "/" itself
+// is unchanged: the board is then the only route.
+export const unstable_settings = { initialRouteName: "(tabs)" };
+
+// Held until the faces are in, so the wait is spent on the splash instead of on
+// an empty root. The tree draws nothing without the family, and the splash is the
+// only thing that can cover that gap.
+void SplashScreen.preventAutoHideAsync().catch(() => {});
+
+export default function RootLayout() {
+	// The app's family (DM Sans, after T3 Code), loaded before anything else
+	// draws: rendering the tree first would paint one frame of SF Pro and then
+	// swap every label under it.
+	//
+	// `error` matters as much as `loaded`. A face that fails to load never flips
+	// `loaded`, so waiting on that flag alone left the app on a blank root forever,
+	// with no way out and nothing on screen to say why. A missing family is worth
+	// losing to a system fallback; it is not worth losing the app to.
+	const [fontsReady, fontError] = useFonts({ ...appFonts, GeistMono_400Regular, ...symbolFonts });
+	const fontsSettled = fontsReady || fontError != null;
+	// The stored theme is read under the splash too, for the same reason as the
+	// fonts: the first frame should already be the user's palette, not the default
+	// one swapped out a tick later. The read never rejects (each half falls back
+	// to its default), so it cannot hold the splash forever.
+	const [themeSettings, setThemeSettings] = useState<ThemeSettings | null>(null);
+	useEffect(() => {
+		let active = true;
+		void loadThemeSettings().then((settings) => {
+			if (active) setThemeSettings(settings);
+		});
+		return () => {
+			active = false;
+		};
+	}, []);
+	const ready = fontsSettled && themeSettings !== null;
+	useEffect(() => {
+		if (ready) void SplashScreen.hideAsync().catch(() => {});
+	}, [ready]);
+	if (!ready) return null;
+
+	// ThemeProvider sits outside everything that reads a colour, including the
+	// Stack's own screenOptions below — hence the inner component: a hook cannot
+	// consume a provider its own component renders.
+	return (
+		// Every touch ends at the root, so a floating control hears taps outside it.
+		<GestureHandlerRootView style={{ flex: 1 }} onTouchStart={rootTouchStart}>
+			{/* Sits above everything that positions itself against the keyboard. It
+			    reports the IME frame-by-frame, which the platform listeners cannot:
+			    Android only fires `keyboardDidShow` once the keyboard has finished
+			    animating, so every dock and composer arrived a beat late. */}
+			<KeyboardProvider>
+				<SafeAreaProvider>
+					<ThemeProvider initial={themeSettings}>
+						<AppProvider>
+							<Shell />
+						</AppProvider>
+					</ThemeProvider>
+				</SafeAreaProvider>
+			</KeyboardProvider>
+		</GestureHandlerRootView>
+	);
+}
+
+function Shell() {
+	const t = useTheme();
+	const { scheme } = useThemeState();
+	const navigationTheme = useMemo(
+		() => ({
+			...(scheme === "dark" ? DarkTheme : DefaultTheme),
+			colors: {
+				...DarkTheme.colors,
+				primary: t.accent,
+				background: t.bgBase,
+				card: t.bgSurface,
+				text: t.textPrimary,
+				border: t.borderSubtle,
+				notification: t.red,
+			},
+		}),
+		[t, scheme],
+	);
+	return (
+		// Themed backdrop behind the navigator. Every view above this one is
+		// transparent, so without it the transition between two screens revealed the
+		// platform's default view colour — a white flash around the page as it moved.
+		<View style={{ flex: 1, backgroundColor: t.bgBase }}>
+			{/* Light content on a dark app, dark content on a light one. */}
+			<StatusBar style={scheme === "dark" ? "light" : "dark"} />
+			<TelemetryManager />
+			<PushManager />
+			<UpdatesManager />
+			<StoreUpdateManager />
+			<OnboardingGate />
+			{/* The navigator paints surfaces of its own, and it reads them from *its*
+			    theme, not from the palette above. Two of those surfaces are visible
+			    only while a page moves: the stack's own container, which shows
+			    through the seam between the outgoing and incoming screens, and the
+			    content view underneath a screen's own background. Left on the
+			    navigator's defaults they are white — the edge that appeared around
+			    the page mid-transition — so the theme carries our palette into the
+			    native layer instead. */}
+			<NavigationThemeProvider value={navigationTheme}>
+			<Stack screenOptions={stackScreenOptions(t)}>
+				{/* A hidden header still needs a title: iOS lists the pages under the
+				    current one by title in the back button's long-press menu, and an
+				    untitled route shows up there as its file name. The board goes by
+				    the tab it is showing. */}
+				<Stack.Screen
+					name="(tabs)"
+					options={({ route }) => ({ headerShown: false, title: boardTitle(getFocusedRouteNameFromRoute(route)) })}
+				/>
+				{/* Settings, Notifications and Pull Requests each hold a stack of
+				    their own, whose pages draw the native headers. On both platforms
+				    they are pages pushed over the board with the stack's own
+				    transition, and go back the way every other page does: the back
+				    button, the edge swipe on iOS, the system back on Android. As
+				    sheets on iOS they slid up and swiped down, unlike every page
+				    opened from them. A machine's edit page holds back while it has
+				    unsaved changes, and a save or forget in flight holds it too. */}
+				<Stack.Screen name="settings" options={{ headerShown: false, title: "Settings", contentStyle: { backgroundColor: t.bgBase } }} />
+				<Stack.Screen name="session/[id]" options={{ title: "Session" }} />
+				{/* The pages pushed over the board lay out under the clear glass bar on
+				    iOS 26 and later, each insetting its own content (see `useGlassBarInset`). */}
+				<Stack.Screen name="review/[sessionId]" options={{ title: "Pull request", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="reviewer/[reviewId]" options={{ title: "Reviewer", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="shell/[handleId]" options={{ title: "Worktree shell", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="preview/[id]" options={{ title: "Preview", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="artifacts/[sessionId]" options={{ title: "Artifacts", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="artifact/[sessionId]" options={{ title: "Artifact", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="artifact-version/[sessionId]" options={{ title: "Version", ...GLASS_HEADER_OPTIONS }} />
+				{/* The conversation's "⋯", a bottom sheet over the chat. iOS opens it
+				    at full height, where every action fits: at three quarters
+				    Archive sat on the sheet's edge, its hint cut off, and pinned
+				    there the list could not be scrolled to it. Android
+				    pins one detent so any decisive swipe down closes it (see
+				    SHEET_ROUTES), tall enough that the actions fit without
+				    scrolling inside the sheet. No title bar on either platform: the
+				    actions start under the grabber. */}
+				<Stack.Screen
+					name="conversation-actions"
+					options={{
+						presentation: "formSheet",
+						sheetAllowedDetents: Platform.OS === "android" ? [0.9] : [1],
+						sheetInitialDetentIndex: 0,
+						sheetGrabberVisible: true,
+						sheetCornerRadius,
+						headerShown: false,
+						title: "Actions",
+						contentStyle: { backgroundColor: t.bgSurface },
+					}}
+				/>
+				{/* An agent's page, expanded from the conversation. Modal, so iOS
+				    swipes it away; the page titles the bar with its own name. */}
+				<Stack.Screen name="render" options={{ presentation: "modal", title: "Page", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="files/[sessionId]/index" options={{ title: "Files", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="files/[sessionId]/folder" options={{ title: "Folder", ...GLASS_HEADER_OPTIONS }} />
+				<Stack.Screen name="files/[sessionId]/file" options={{ title: "File", ...GLASS_HEADER_OPTIONS }} />
+				{/* A page pushed over the tabs, laid out as a conversation that has
+				    not begun: its settings sit above the composer at the bottom, and
+				    starting the task replaces it with that conversation. */}
+				<Stack.Screen name="spawn" options={{ title: "New task", ...GLASS_HEADER_OPTIONS }} />
+				{/* A page pushed over the board, like Settings. */}
+				<Stack.Screen name="notifications" options={{ headerShown: false, title: "Notifications", contentStyle: { backgroundColor: t.bgBase } }} />
+				{/* The page renames itself to the project once it loads. */}
+				<Stack.Screen name="project/[id]" options={{ title: "Project", ...GLASS_HEADER_OPTIONS }} />
+				{/* Pull Requests opens from the board's header on iOS (a tab on
+				    Android), a page pushed over the board like Settings. */}
+				<Stack.Screen name="prs" options={{ headerShown: false, title: "Pull Requests", contentStyle: { backgroundColor: t.bgBase } }} />
+				{/* Titled though its header is hidden: the pair page pushed over it
+				    takes this as its back button's name, which was the route's
+				    "onboarding" without one. */}
+				<Stack.Screen name="onboarding" options={{ headerShown: false, gestureEnabled: false, title: "Welcome" }} />
+				{/* Pairing is two pages pushed over whatever opened it, each with the
+				    stack's back: the scanner, then the manual form over it. */}
+				<Stack.Screen name="pair" options={{ title: "Pair a machine" }} />
+				<Stack.Screen name="connect" options={{ title: "Connect manually" }} />
+
+				{/* Sheets. `formSheet` is a real UIKit sheet, so the drag-to-dismiss,
+				    the grabber and the rubber-banding come from the OS rather than
+				    being re-implemented on top of RN's `Modal` (which has no gesture
+				    support at all — that's why the hand-rolled version never felt
+				    right). Heights come from SHEET_ROUTES. */}
+				{SHEET_ROUTES.map(({ name, detents, androidDetents }) => (
+					<Stack.Screen
+						key={name}
+						name={name}
+						options={{
+							presentation: "formSheet",
+							sheetAllowedDetents: Platform.OS === "android" && androidDetents ? [...androidDetents] : detents === "fitToContents" ? "fitToContents" : [...detents],
+							sheetInitialDetentIndex: 0,
+							sheetGrabberVisible: true,
+							sheetCornerRadius,
+							headerShown: false,
+							contentStyle: { backgroundColor: t.bgSurface },
+						}}
+					/>
+				))}
+				{/* Shown from the start rather than by the page, because a modal whose
+				    header appears after it mounts is rebuilt. The bar takes the
+				    grouped page colour of the iOS list below it. */}
+				{PICKER_SHEETS.map(({ name, title }) => (
+					<Stack.Screen
+						key={name}
+						name={name}
+						options={{
+							presentation: "formSheet",
+							sheetAllowedDetents: [0.5, 0.95],
+							sheetInitialDetentIndex: 0,
+							sheetGrabberVisible: true,
+							sheetCornerRadius,
+							headerShown: Platform.OS === "ios",
+							title,
+							headerStyle: { backgroundColor: t.bgBase },
+							contentStyle: { backgroundColor: t.bgSurface },
+						}}
+					/>
+				))}
+				{/* The composer's skill and file picker searches in a native bar on
+				    iOS, under the title the page sets ("Skills", "Worktree files").
+				    Android searches in the sheet's body. */}
+				<Stack.Screen
+					name="sheets/composer-picker"
+					options={{
+						presentation: "formSheet",
+						sheetAllowedDetents: [0.6, 0.95],
+						sheetInitialDetentIndex: 0,
+						sheetGrabberVisible: true,
+						sheetCornerRadius,
+						headerShown: Platform.OS === "ios",
+						title: "Insert",
+						headerStyle: { backgroundColor: t.bgSurface },
+						contentStyle: { backgroundColor: t.bgSurface },
+					}}
+				/>
+				<Stack.Screen
+					name="sheets/machine-name"
+					options={Platform.OS === "android" ? {
+						presentation: "transparentModal",
+						animation: "none",
+						headerShown: false,
+						contentStyle: { backgroundColor: "transparent" },
+					} : {
+						...NAME_SHEET_OPTIONS,
+						title: "Name this machine",
+						// Two short rows: half height clears the keyboard on every phone.
+						sheetAllowedDetents: [0.5],
+						headerStyle: { backgroundColor: t.bgBase },
+						contentStyle: { backgroundColor: t.bgBase },
+					}}
+				/>
+			</Stack>
+			</NavigationThemeProvider>
+		</View>
+	);
+}

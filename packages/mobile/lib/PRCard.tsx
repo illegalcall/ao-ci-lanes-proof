@@ -1,0 +1,167 @@
+import { MenuView, type MenuAction, type MenuComponentRef, type NativeActionEvent } from "@expo/ui/community/menu";
+import * as Clipboard from "expo-clipboard";
+import { useRouter } from "expo-router";
+import { memo, useRef } from "react";
+import { Feather } from "./icons";
+import { useOpenPage } from "./pageNavigation";
+import { Platform, Pressable, StyleSheet, Text, View, type AccessibilityActionEvent } from "react-native";
+import { sessionTitle, type DashboardPR, type DashboardSession, type SessionPRSummary } from "./api";
+import { rowDividerWidth } from "./divider";
+import { haptics } from "./haptics";
+import { openGitHub } from "./openGitHub";
+import { prCardMenuIcons } from "./pr-card-menu-icons";
+import { usePressFeedback } from "./pressFeedback";
+import type { Theme } from "./theme";
+import {
+	prBlockerLine,
+	prStateVisual,
+	prStatusAtoms,
+	prSummaryLine,
+	prTitle,
+	stateVisualOf,
+	toneColor,
+	type PRLifecycle,
+} from "./prView";
+import { reviewRouteForPR, workerRouteForSession } from "./reviewView";
+import { useTheme, useThemeState, useThemedStyles } from "./ThemeProvider";
+import { useMenuRowWidth } from "./useMenuRowWidth";
+import { iconSize, space, type } from "./tokens";
+
+type PRCardAction = "openWorker" | "openInGitHub" | "copyLink";
+
+const ACTION_TITLES: Record<PRCardAction, string> = {
+	openWorker: "Open worker",
+	openInGitHub: "Open in GitHub",
+	copyLink: "Copy link",
+};
+
+/**
+ * A pull-request row with the same hierarchy as WorkerListRow: an eyebrow, the
+ * title, then metadata, none of it smaller than footnote.
+ *
+ * A tap opens the review; the long press reaches the worker too. Everything else about the pull request is in the
+ * row's long-press menu — a SwiftUI context menu on iOS, a Material dropdown on
+ * Android — and in its accessibility actions, so a screen reader reaches the
+ * same choices from the one row.
+ */
+export const PRCard = memo(function PRCard({
+	pr,
+	session,
+	summary,
+	hostId,
+	hostName,
+	onLinkCopied,
+}: {
+	pr: DashboardPR;
+	session: DashboardSession;
+	summary?: SessionPRSummary;
+	hostId: string;
+	hostName?: string;
+	/** Called once the pull request's link is on the clipboard. */
+	onLinkCopied?: () => void;
+}) {
+	const t = useTheme();
+	const { scheme } = useThemeState();
+	const styles = useThemedStyles(makeStyles);
+	const feedback = usePressFeedback("row");
+	const openPage = useOpenPage();
+	const router = useRouter();
+	const menu = useRef<MenuComponentRef>(null);
+	const menuWidth = useMenuRowWidth();
+	const state = summary ? stateVisualOf(t, summary.state as PRLifecycle) : prStateVisual(t, pr);
+	const title = summary?.title?.trim() || prTitle(pr, sessionTitle(session));
+	// The repository's own name, without its owner: the line ends in an
+	// ellipsis if it still runs long, rather than losing its middle.
+	const project = (summary?.repo || session.projectId || "Standalone").split("/").pop() || "Standalone";
+	const projectLabel = hostName ? `${hostName} · ${project}` : project;
+	const branches = summary
+		? [summary.sourceBranch, summary.targetBranch].filter(Boolean).join(" → ")
+		: session.branch || "";
+	const diff = summary && (summary.changedFiles > 0 || summary.additions > 0 || summary.deletions > 0)
+		? `${summary.changedFiles} ${summary.changedFiles === 1 ? "file" : "files"}  +${summary.additions} −${summary.deletions}`
+		: "";
+	const detail = [`#${pr.number}`, branches, diff].filter(Boolean).join(" · ");
+	const atoms = summary ? prStatusAtoms(summary) : [prSummaryLine(pr)];
+	const status = atoms[0] ?? { text: state.label, tone: "passive" as const };
+	const blockers = summary ? prBlockerLine(summary) : null;
+	const link = summary?.htmlUrl || summary?.url || pr.url;
+
+	const run = (action: string) => {
+		if (action === "openWorker") router.push(workerRouteForSession(session, hostId));
+		if (action === "openInGitHub") void openGitHub(link);
+		if (action === "copyLink") {
+			void Clipboard.setStringAsync(link);
+			haptics.success();
+			onLinkCopied?.();
+		}
+	};
+	const actions: readonly PRCardAction[] = link ? ["openWorker", "openInGitHub", "copyLink"] : ["openWorker"];
+	const menuActions: MenuAction[] = actions.map((id) => ({ id, title: ACTION_TITLES[id], image: prCardMenuIcons[id], imageColor: t.textSecondary }));
+
+	const row = (
+		<Pressable
+			accessibilityRole="button"
+			accessibilityLabel={`${title}. ${projectLabel}. Pull request ${pr.number}. ${status.text}.`}
+			accessibilityActions={actions.map((name) => ({ name, label: ACTION_TITLES[name] }))}
+			onAccessibilityAction={(event: AccessibilityActionEvent) => run(event.nativeEvent.actionName)}
+			android_ripple={feedback.android_ripple}
+			onPress={() => {
+				openPage(reviewRouteForPR(session.id, pr, hostId));
+			}}
+			// The row claims the touch, so on Android its long press opens the
+			// menu itself; iOS's context menu takes the gesture natively.
+			onLongPress={Platform.OS === "android" ? () => menu.current?.show() : undefined}
+			style={({ pressed }) => [styles.row, menuWidth.style, pressed && feedback.pressed]}
+		>
+			<View style={styles.eyebrow}>
+				<Feather name="git-pull-request" size={iconSize.sm} color={state.color} />
+				<Text style={styles.project} numberOfLines={1}>{projectLabel}</Text>
+				<Text style={[styles.status, { color: toneColor(t, status.tone) }]} numberOfLines={1}>{status.text}</Text>
+			</View>
+
+			<View style={styles.copy}>
+				<Text style={styles.title} numberOfLines={1}>{title}</Text>
+				<Text style={styles.details} numberOfLines={1}>{detail}</Text>
+			</View>
+
+			{blockers ? <Text style={styles.blockers} numberOfLines={1}>{blockers}</Text> : null}
+		</Pressable>
+	);
+
+	return (
+		<View onLayout={menuWidth.onLayout}>
+			<MenuView
+				ref={menu}
+				colorScheme={scheme}
+				actions={menuActions}
+				shouldOpenOnLongPress
+				onPressAction={(event: NativeActionEvent) => run(event.nativeEvent.event)}
+				testID="pr-card-menu"
+			>
+				{row}
+			</MenuView>
+		</View>
+	);
+});
+
+const makeStyles = (t: Theme) =>
+	StyleSheet.create({
+		// Opaque, so the row iOS lifts out for its context menu is not see-through.
+		row: {
+			minHeight: 76,
+			justifyContent: "center",
+			paddingHorizontal: space.lg,
+			paddingVertical: space.sm,
+			gap: space.hair,
+			backgroundColor: t.bgBase,
+		},
+		// Inset to the text, as a worker row's is.
+		divider: { position: "absolute", left: space.lg, right: 0, bottom: 0, height: rowDividerWidth, backgroundColor: t.borderSubtle },
+		eyebrow: { flexDirection: "row", alignItems: "center", gap: space.xs, minHeight: 17 },
+		project: { fontFamily: "DMSans_500Medium", flex: 1, color: t.textSecondary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontWeight: "500" },
+		status: { fontFamily: "DMSans_500Medium", flexShrink: 0, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontWeight: "500" },
+		copy: { gap: space.hair },
+		title: { fontFamily: "DMSans_600SemiBold", color: t.textPrimary, fontSize: 16, lineHeight: 21, fontWeight: "600", letterSpacing: -0.15 },
+		details: { color: t.textTertiary, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, fontFamily: t.fontMono },
+		blockers: { fontFamily: "DMSans_400Regular", color: t.amber, fontSize: type.footnote.fontSize, lineHeight: type.footnote.lineHeight, marginTop: space.hair },
+	});

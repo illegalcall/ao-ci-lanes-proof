@@ -1,0 +1,126 @@
+import { describe, expect, it } from "vitest";
+import { materialDrawableNames } from "./toolbarIcon.types";
+
+import {
+	ARCHIVE_SESSION_HINT,
+	ARCHIVE_SESSION_CONFIRM,
+	workerAccessibilityActions,
+	workerActionNamed,
+	workerActionSymbols,
+	workerContextActions,
+	type WorkerActionId,
+	type WorkerActionState,
+} from "./worker-action-model";
+
+const ALL_ACTIONS: readonly WorkerActionId[] = ["open", "pin", "unpin", "rename", "resume", "restore", "openPr", "delete"];
+
+const state = (over: Partial<WorkerActionState> = {}): WorkerActionState => ({
+	pinned: false,
+	terminated: false,
+	stopped: false,
+	hasPr: false,
+	...over,
+});
+
+const ids = (over: Partial<WorkerActionState> = {}) => workerContextActions(state(over)).map((a) => a.id);
+
+describe("workerContextActions", () => {
+	it("offers the always-available actions on a plain running worker", () => {
+		expect(ids()).toEqual(["open", "pin", "rename", "delete"]);
+	});
+
+	it("flips pin to unpin for a pinned worker", () => {
+		expect(ids({ pinned: true })).toContain("unpin");
+		expect(ids({ pinned: true })).not.toContain("pin");
+	});
+
+	it("offers the pull request only when there is one", () => {
+		const action = workerContextActions(state({ hasPr: true })).find((item) => item.id === "openPr");
+		expect(action).toEqual({ id: "openPr", title: "Review pull request" });
+		expect(ids()).not.toContain("openPr");
+	});
+
+	// The chat screen already makes this choice: a terminated AO session is
+	// restored, a merely stopped agent is resumed. Offering both would push that
+	// distinction onto the user.
+	it("offers resume for a stopped agent and restore for a terminated session", () => {
+		expect(ids({ stopped: true })).toContain("resume");
+		expect(ids({ stopped: true })).not.toContain("restore");
+		expect(ids({ terminated: true })).toContain("restore");
+		expect(ids({ terminated: true })).not.toContain("resume");
+	});
+
+	it("prefers restore when a session is both terminated and stopped", () => {
+		expect(ids({ terminated: true, stopped: true })).toContain("restore");
+		expect(ids({ terminated: true, stopped: true })).not.toContain("resume");
+	});
+
+	// Regression fence: there is no stop or pause endpoint. kill() is what Delete
+	// calls, so a "stop" entry would be a second name for the same destructive
+	// action.
+	it("never offers an action without an endpoint behind it", () => {
+		const everything = [
+			...ids(),
+			...ids({ pinned: true, hasPr: true, stopped: true }),
+			...ids({ terminated: true, hasPr: true }),
+		];
+		expect(everything).not.toContain("stop");
+		expect(everything).not.toContain("pause");
+	});
+
+	// Archive calls killSession, which deletes a clean worktree folder.
+	it("keeps Archive last and marks it as the only destructive action", () => {
+		for (const over of [{}, { pinned: true, hasPr: true }, { terminated: true }]) {
+			const actions = workerContextActions(state(over));
+			expect(actions.at(-1)).toEqual({ id: "delete", title: "Archive session", destructive: true });
+			expect(actions.filter((a) => a.destructive)).toHaveLength(1);
+		}
+	});
+
+	it("confirms Archive with desktop's wording", () => {
+		expect(ARCHIVE_SESSION_CONFIRM).toEqual({
+			title: "Are you sure you want to archive this session?",
+			message: "You can always restore it from the Archive section later.",
+			cancel: "No",
+			confirm: "Confirm",
+		});
+		// Short enough for the two lines iOS's menu gives a subtitle.
+		expect(ARCHIVE_SESSION_HINT).toBe("Stops the agent. Keeps uncommitted work.");
+	});
+
+	it("opens with Open, so the menu's first item is the row's own tap", () => {
+		expect(ids({ terminated: true, hasPr: true, pinned: true })[0]).toBe("open");
+	});
+});
+
+describe("workerAccessibilityActions", () => {
+	// A screen reader can neither swipe a row open nor long-press it, so the
+	// menu's actions have to be the row's own accessibility actions.
+	it("offers every menu action but Open, which is the row's activation", () => {
+		const actions = workerContextActions(state({ hasPr: true, stopped: true }));
+		expect(workerAccessibilityActions(actions)).toEqual([
+			{ name: "resume", label: "Resume agent" },
+			{ name: "pin", label: "Pin" },
+			{ name: "rename", label: "Rename" },
+			{ name: "openPr", label: "Review pull request" },
+			{ name: "delete", label: "Archive session" },
+		]);
+	});
+
+	it("routes only the actions the row offers", () => {
+		const actions = workerContextActions(state());
+		expect(workerActionNamed(actions, "delete")).toBe("delete");
+		expect(workerActionNamed(actions, "activate")).toBeUndefined();
+		expect(workerActionNamed(actions, "restore")).toBeUndefined();
+	});
+});
+
+describe("workerActionSymbols", () => {
+	// Android's menu takes a bundled drawable, and a missing file is a
+	// bundle-time failure rather than a blank icon, so every action's Material
+	// Symbol has to be one the shared registry bundles (lib/toolbarIcon.test.ts
+	// checks its files).
+	it.each(ALL_ACTIONS)("draws %s's Material Symbol from the shared drawable registry", (id) => {
+		expect(materialDrawableNames).toContain(workerActionSymbols[id].android);
+	});
+});
