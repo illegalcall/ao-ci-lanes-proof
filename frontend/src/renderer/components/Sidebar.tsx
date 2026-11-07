@@ -3930,3 +3930,4 @@ function CreateProjectListItem() {
 		</SidebarMenuItem>
 	);
 }
+// proof: draft then ready scenario
