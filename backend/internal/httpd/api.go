@@ -438,3 +438,5 @@ func userMessageRecorder(sessions any) controllers.UserMessageRecorder {
 	recorder, _ := sessions.(controllers.UserMessageRecorder)
 	return recorder
 }
+
+// proof: backend httpd scenario
